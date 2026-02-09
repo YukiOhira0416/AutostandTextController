@@ -116,12 +116,12 @@ namespace AutostandTextController
         {
             var sb = new StringBuilder();
             sb.AppendLine("============================================================");
-            sb.AppendLine($"Time: {endedAt.ToString(\"yyyy/MM/dd HH:mm:ss.fff\", CultureInfo.InvariantCulture)}");
+            sb.AppendLine($"Time: {endedAt.ToString("yyyy/MM/dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}");
             if (!string.IsNullOrEmpty(op))
                 sb.AppendLine($"Op: {op}");
 
             var ms = (endedAt - startedAt).TotalMilliseconds;
-            sb.AppendLine($"Elapsed: {ms.ToString(\"0.###\", CultureInfo.InvariantCulture)} ms");
+            sb.AppendLine($"Elapsed: {ms.ToString("0.###", CultureInfo.InvariantCulture)} ms");
 
             if (request != null)
             {
@@ -266,12 +266,12 @@ namespace AutostandTextController
                 var endedAt = DateTime.Now;
                 var sb = new StringBuilder();
                 sb.AppendLine("============================================================");
-                sb.AppendLine($"Time: {endedAt.ToString(\"yyyy/MM/dd HH:mm:ss.fff\", CultureInfo.InvariantCulture)}");
+                sb.AppendLine($"Time: {endedAt.ToString("yyyy/MM/dd HH:mm:ss.fff", CultureInfo.InvariantCulture)}");
                 if (!string.IsNullOrEmpty(op))
                     sb.AppendLine($"Op: {op}");
 
                 var ms = (endedAt - startedAt).TotalMilliseconds;
-                sb.AppendLine($"Elapsed: {ms.ToString(\"0.###\", CultureInfo.InvariantCulture)} ms");
+                sb.AppendLine($"Elapsed: {ms.ToString("0.###", CultureInfo.InvariantCulture)} ms");
 
                 if (request != null)
                 {

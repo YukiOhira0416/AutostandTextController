@@ -1410,7 +1410,7 @@ namespace AutostandTextController
                 if (s.IndexOf(' ') < 0 && s.IndexOf('"') < 0)
                     return s;
 
-                return """ + s.Replace(""", "\\"") + """;
+                return "\"" + s.Replace("\"", "\\\"") + "\"";
             }
 
             private static bool TryParseTailLine(string line, out WranglerTailEvent ev)

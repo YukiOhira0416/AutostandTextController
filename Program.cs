@@ -2,6 +2,9 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+using Autostand;
 
 namespace AutostandTextController
 {
@@ -94,19 +97,19 @@ namespace AutostandTextController
             switch (cmd)
             {
                 case "up":
-                    PrintStand(client.Up(cfg.StandId, cfg.OpTimeoutSec));
+                    PrintStand(DoUp(client, cfg.StandId, cfg.OpTimeoutSec));
                     break;
 
                 case "down":
-                    PrintStand(client.Down(cfg.StandId, cfg.OpTimeoutSec));
+                    PrintStand(DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
                     break;
 
                 case "status":
-                    PrintStand(client.CheckStatus(cfg.StandId, cfg.OpTimeoutSec));
+                    PrintStand(DoStatus(client, cfg.StandId, cfg.OpTimeoutSec));
                     break;
 
                 case "battery":
-                    PrintBattery(client.CheckBattery(cfg.StandId, cfg.OpTimeoutSec));
+                    PrintBattery(DoBattery(client, cfg.StandId, cfg.OpTimeoutSec));
                     break;
 
                 default:
@@ -156,19 +159,19 @@ namespace AutostandTextController
                     switch (cmd)
                     {
                         case "up":
-                            PrintStand(client.Up(cfg.StandId, cfg.OpTimeoutSec));
+                            PrintStand(DoUp(client, cfg.StandId, cfg.OpTimeoutSec));
                             break;
 
                         case "down":
-                            PrintStand(client.Down(cfg.StandId, cfg.OpTimeoutSec));
+                            PrintStand(DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
                             break;
 
                         case "status":
-                            PrintStand(client.CheckStatus(cfg.StandId, cfg.OpTimeoutSec));
+                            PrintStand(DoStatus(client, cfg.StandId, cfg.OpTimeoutSec));
                             break;
 
                         case "battery":
-                            PrintBattery(client.CheckBattery(cfg.StandId, cfg.OpTimeoutSec));
+                            PrintBattery(DoBattery(client, cfg.StandId, cfg.OpTimeoutSec));
                             break;
 
                         default:
@@ -181,6 +184,432 @@ namespace AutostandTextController
                 {
                     PrintException(ex);
                 }
+            }
+        }
+
+        private static StandInfo DoUp(AutostandClient client, int standId, double timeoutSec)
+        {
+            // Support multiple Autostand.dll versions:
+            // - Newer: Up/Down/CheckStatus/CheckBattery (sync wrappers)
+            // - Newer: UpAsync/DownAsync/CheckStatusAsync/CheckBatteryAsync
+            // - Older: Open/Close/GetStatus/GetBattery
+            object res;
+
+            // Prefer "Up" / "UpAsync"
+            if (TryInvokeWithArgOptions(client, "Up", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "up", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "UpAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "up", standId, timeoutSec);
+
+            // Fallback: "Open" / "OpenAsync"
+            if (TryInvokeWithArgOptions(client, "Open", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "up", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "OpenAsync", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "up", standId, timeoutSec);
+
+            throw new MissingMethodException("AutostandClient", "Up/UpAsync/Open/OpenAsync");
+        }
+
+        private static StandInfo DoDown(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "Down", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "down", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "DownAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "down", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "Close", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "down", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "CloseAsync", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "down", standId, timeoutSec);
+
+            throw new MissingMethodException("AutostandClient", "Down/DownAsync/Close/CloseAsync");
+        }
+
+        private static StandInfo DoStatus(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "CheckStatus", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "status", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "CheckStatusAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "status", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "GetStatus", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "status", standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "GetStatusAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceStandInfo(client, AwaitIfTask(res), "status", standId, timeoutSec);
+
+            // As a last resort, if we cannot call a direct status method but can do "RequestStatusAsync" + "WaitTransactionAsync"
+            if (TryInvokeWithArgOptions(client, "RequestStatusAsync", out res,
+                    new object[] { standId },
+                    new object[] { (object)standId }))
+            {
+                var receiptObj = AwaitIfTask(res);
+                var txCode = GetStringProperty(receiptObj, "TransactionCode");
+                if (!string.IsNullOrEmpty(txCode))
+                {
+                    var s = ResolveStandFromTransaction(client, txCode, timeoutSec);
+                    if (s != null) return s;
+                }
+            }
+
+            throw new MissingMethodException("AutostandClient", "CheckStatus/CheckStatusAsync/GetStatus/GetStatusAsync/RequestStatusAsync");
+        }
+
+        private static BatteryLevel? DoBattery(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "CheckBattery", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceBatteryLevel(AwaitIfTask(res), client, standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "CheckBatteryAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceBatteryLevel(AwaitIfTask(res), client, standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "GetBattery", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceBatteryLevel(AwaitIfTask(res), client, standId, timeoutSec);
+
+            if (TryInvokeWithArgOptions(client, "GetBatteryAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return CoerceBatteryLevel(AwaitIfTask(res), client, standId, timeoutSec);
+
+            // Fallback: use status then extract battery
+            var st = DoStatus(client, standId, timeoutSec);
+            return st.Battery;
+        }
+
+        private static BatteryLevel? CoerceBatteryLevel(object obj, AutostandClient client, int standId, double timeoutSec)
+        {
+            if (obj == null) return null;
+
+            if (obj is BatteryLevel b)
+                return b;
+
+            // Some variants return StandInfo (battery embedded)
+            if (obj is StandInfo s)
+                return s.Battery;
+
+            var standProp = obj.GetType().GetProperty("Stand", BindingFlags.Instance | BindingFlags.Public);
+            if (standProp != null)
+            {
+                var standObj = standProp.GetValue(obj);
+                if (standObj is StandInfo s2)
+                    return s2.Battery;
+            }
+
+            // If we get a transaction code, resolve and extract
+            if (obj is string tx)
+            {
+                var s3 = ResolveStandFromTransaction(client, tx, timeoutSec);
+                if (s3 != null) return s3.Battery;
+            }
+
+            throw new InvalidOperationException($"battery: unexpected return type: {obj.GetType().FullName}");
+        }
+
+        private static StandInfo CoerceStandInfo(AutostandClient client, object obj, string opName, int standId, double timeoutSec)
+        {
+            if (obj == null)
+                throw new InvalidOperationException($"{opName}: operation returned null");
+
+            if (obj is StandInfo s)
+                return s;
+
+            // Some APIs return TransactionResult-like objects with a Stand property.
+            var standProp = obj.GetType().GetProperty("Stand", BindingFlags.Instance | BindingFlags.Public);
+            if (standProp != null)
+            {
+                var standObj = standProp.GetValue(obj);
+                if (standObj is StandInfo s2)
+                    return s2;
+            }
+
+            // Some APIs return a transaction code string.
+            if (obj is string tx)
+            {
+                var s3 = ResolveStandFromTransaction(client, tx, timeoutSec);
+                if (s3 != null)
+                    return s3;
+
+                // If we cannot wait transaction, fall back to polling status.
+                var s4 = PollStatusUntilTimeout(client, standId, timeoutSec);
+                if (s4 != null)
+                    return s4;
+
+                throw new InvalidOperationException($"{opName}: returned transaction code but could not resolve stand info: {tx}");
+            }
+
+            throw new InvalidOperationException($"{opName}: unexpected return type: {obj.GetType().FullName}");
+        }
+
+        private static StandInfo ResolveStandFromTransaction(AutostandClient client, string transactionCode, double timeoutSec)
+        {
+            if (string.IsNullOrEmpty(transactionCode)) return null;
+
+            object res;
+            if (TryInvokeWithArgOptions(client, "WaitTransactionAsync", out res,
+                    new object[] { transactionCode, timeoutSec },
+                    new object[] { transactionCode }))
+            {
+                var txObj = AwaitIfTask(res);
+                return ExtractStandFromObject(txObj);
+            }
+
+            if (TryInvokeWithArgOptions(client, "WaitTransaction", out res,
+                    new object[] { transactionCode, timeoutSec },
+                    new object[] { transactionCode }))
+            {
+                return ExtractStandFromObject(res);
+            }
+
+            // Try GetTransaction polling if WaitTransaction isn't available.
+            var start = DateTime.UtcNow;
+            while ((DateTime.UtcNow - start).TotalSeconds < timeoutSec)
+            {
+                if (TryInvokeWithArgOptions(client, "GetTransactionAsync", out res,
+                        new object[] { transactionCode }))
+                {
+                    var txObj = AwaitIfTask(res);
+                    var s = ExtractStandFromObject(txObj);
+                    if (s != null) return s;
+                }
+                else if (TryInvokeWithArgOptions(client, "GetTransaction", out res,
+                        new object[] { transactionCode }))
+                {
+                    var s = ExtractStandFromObject(res);
+                    if (s != null) return s;
+                }
+                else
+                {
+                    break;
+                }
+
+                System.Threading.Thread.Sleep(300);
+            }
+
+            return null;
+        }
+
+        private static StandInfo PollStatusUntilTimeout(AutostandClient client, int standId, double timeoutSec)
+        {
+            // Best-effort fallback: repeatedly call DoStatus() for up to timeoutSec.
+            // If status API is also missing, this will throw and be handled by caller.
+            var start = DateTime.UtcNow;
+            StandInfo last = null;
+
+            while ((DateTime.UtcNow - start).TotalSeconds < timeoutSec)
+            {
+                try
+                {
+                    last = DoStatus(client, standId, Math.Max(3.0, Math.Min(10.0, timeoutSec)));
+                }
+                catch
+                {
+                    // If status itself cannot be executed, abort.
+                    return null;
+                }
+
+                // If we can read operate / standState, treat it as "good enough".
+                if (last != null)
+                    return last;
+
+                System.Threading.Thread.Sleep(300);
+            }
+
+            return last;
+        }
+
+        private static StandInfo ExtractStandFromObject(object obj)
+        {
+            if (obj == null) return null;
+            if (obj is StandInfo s) return s;
+
+            var standProp = obj.GetType().GetProperty("Stand", BindingFlags.Instance | BindingFlags.Public);
+            if (standProp == null) return null;
+
+            var standObj = standProp.GetValue(obj);
+            return standObj as StandInfo;
+        }
+
+        private static string GetStringProperty(object obj, string propertyName)
+        {
+            if (obj == null) return null;
+            var p = obj.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
+            if (p == null) return null;
+            return p.GetValue(obj) as string;
+        }
+
+        private static object AwaitIfTask(object maybeTask)
+        {
+            if (maybeTask == null) return null;
+
+            if (maybeTask is Task t)
+            {
+                t.GetAwaiter().GetResult();
+
+                var taskType = maybeTask.GetType();
+                if (taskType.IsGenericType)
+                {
+                    var resultProp = taskType.GetProperty("Result", BindingFlags.Instance | BindingFlags.Public);
+                    if (resultProp != null)
+                        return resultProp.GetValue(maybeTask);
+                }
+
+                return null;
+            }
+
+            return maybeTask;
+        }
+
+        private static bool TryInvokeWithArgOptions(object target, string methodName, out object result, params object[][] argOptions)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (string.IsNullOrEmpty(methodName)) throw new ArgumentException("methodName is required");
+
+            var t = target.GetType();
+            var methods = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal))
+                .ToArray();
+
+            foreach (var args in argOptions)
+            {
+                foreach (var m in methods)
+                {
+                    var ps = m.GetParameters();
+                    if (ps.Length != args.Length) continue;
+
+                    if (!TryConvertArgs(args, ps, out var converted))
+                        continue;
+
+                    try
+                    {
+                        result = m.Invoke(target, converted);
+                        return true;
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        // Bubble up the real exception if the method was found and invoked.
+                        throw tie.InnerException ?? tie;
+                    }
+                }
+            }
+
+            result = null;
+            return false;
+        }
+
+        private static bool TryConvertArgs(object[] args, ParameterInfo[] ps, out object[] converted)
+        {
+            converted = new object[args.Length];
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (!TryConvertArg(args[i], ps[i].ParameterType, out var cv))
+                {
+                    converted = null;
+                    return false;
+                }
+                converted[i] = cv;
+            }
+
+            return true;
+        }
+
+        private static bool TryConvertArg(object arg, Type paramType, out object converted)
+        {
+            converted = null;
+
+            if (paramType == typeof(object))
+            {
+                converted = arg;
+                return true;
+            }
+
+            var underlying = Nullable.GetUnderlyingType(paramType) ?? paramType;
+
+            if (arg == null)
+            {
+                // null is OK for reference types or Nullable<T>
+                if (!underlying.IsValueType || Nullable.GetUnderlyingType(paramType) != null)
+                {
+                    converted = null;
+                    return true;
+                }
+                return false;
+            }
+
+            if (underlying.IsInstanceOfType(arg))
+            {
+                converted = arg;
+                return true;
+            }
+
+            try
+            {
+                if (underlying.IsEnum)
+                {
+                    if (arg is string s)
+                    {
+                        converted = Enum.Parse(underlying, s, ignoreCase: true);
+                        return true;
+                    }
+
+                    var enumUnderlying = Enum.GetUnderlyingType(underlying);
+                    var num = Convert.ChangeType(arg, enumUnderlying, CultureInfo.InvariantCulture);
+                    converted = Enum.ToObject(underlying, num);
+                    return true;
+                }
+
+                // Convert between common primitives (int <-> long <-> double, string -> number, etc.)
+                converted = Convert.ChangeType(arg, underlying, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -451,86 +880,6 @@ namespace AutostandTextController
                 i++;
                 return list[i];
             }
-        }
-    }
-
-    public class AutostandClient : IDisposable
-    {
-        public static string DefaultBaseUrl { get; } = "https://api.autostand.example.com/v1/";
-
-        public AutostandClient(string apiKey, string baseUrl, double timeoutSec)
-        {
-        }
-
-        public StandInfo Up(int standId, double timeoutSec)
-        {
-            throw new NotImplementedException("AutostandClient.Up is not implemented");
-        }
-
-        public StandInfo Down(int standId, double timeoutSec)
-        {
-            throw new NotImplementedException("AutostandClient.Down is not implemented");
-        }
-
-        public StandInfo CheckStatus(int standId, double timeoutSec)
-        {
-            throw new NotImplementedException("AutostandClient.CheckStatus is not implemented");
-        }
-
-        public BatteryLevel? CheckBattery(int standId, double timeoutSec)
-        {
-            throw new NotImplementedException("AutostandClient.CheckBattery is not implemented");
-        }
-
-        public void Dispose()
-        {
-        }
-    }
-
-    public class StandInfo
-    {
-        public int Id { get; set; }
-        public string Operate { get; set; }
-        public string ArmState { get; set; }
-        public string StandState { get; set; }
-        public BatteryLevel? Battery { get; set; }
-        public bool? UltrasonicDetected { get; set; }
-    }
-
-    public enum BatteryLevel
-    {
-        Level0 = 0,
-        Level10 = 10,
-        Level20 = 20,
-        Level30 = 30,
-        Level40 = 40,
-        Level50 = 50,
-        Level60 = 60,
-        Level70 = 70,
-        Level80 = 80,
-        Level90 = 90,
-        Level100 = 100
-    }
-
-    public class AutoStandApiError : Exception
-    {
-        public string Code { get; set; }
-        public string Title { get; set; }
-        public string Description { get; set; }
-        public DateTime? ResponseDate { get; set; }
-
-        public AutoStandApiError(string message) : base(message)
-        {
-        }
-    }
-
-    public class AutoStandHttpError : Exception
-    {
-        public int StatusCode { get; set; }
-        public object Body { get; set; }
-
-        public AutoStandHttpError(string message) : base(message)
-        {
         }
     }
 }

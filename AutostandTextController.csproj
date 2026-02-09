@@ -19,6 +19,11 @@
       You can override this when building:
         msbuild AutostandTextController.csproj /p:AutostandDllPath="C:\\path\\to\\Autostand.dll"
     -->
+    <!-- Prefer a repo-local build output when this project lives next to the autostand repo. -->
+    <AutostandDllPath Condition=" '$(AutostandDllPath)' == '' AND Exists('..\\autostand\\bin\\Debug\\net481\\Autostand.dll') ">..\autostand\bin\Debug\net481\Autostand.dll</AutostandDllPath>
+    <AutostandDllPath Condition=" '$(AutostandDllPath)' == '' AND Exists('..\\autostand\\bin\\Release\\net481\\Autostand.dll') ">..\autostand\bin\Release\net481\Autostand.dll</AutostandDllPath>
+    <!-- Fallback: user-local build output path. Override when building:
+         msbuild AutostandTextController.csproj /p:AutostandDllPath="C:\\path\\to\\Autostand.dll" -->
     <AutostandDllPath Condition=" '$(AutostandDllPath)' == '' ">C:\Users\bene-0103\source\repos\autostand\bin\Debug\net481\Autostand.dll</AutostandDllPath>
     <AutostandDllDir>$([System.IO.Path]::GetDirectoryName('$(AutostandDllPath)'))</AutostandDllDir>
   </PropertyGroup>

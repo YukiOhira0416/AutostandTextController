@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Threading.Tasks;
 using Autostand;
@@ -92,7 +93,13 @@ namespace AutostandTextController
                     WranglerTailUrlFilter = BuildWranglerTailUrlFilter(baseUrl)
                 };
 
-                using (var client = new AutostandClient(apiKey: cfg.ApiKey, baseUrl: cfg.BaseUrl, timeoutSec: 10.0))
+                var httpTimeoutSec = Math.Max(15.0, Math.Min(120.0, cfg.OpTimeoutSec + 5.0));
+
+                using (var client = new AutostandClient(
+                    apiKey: cfg.ApiKey,
+                    baseUrl: cfg.BaseUrl,
+                    timeoutSec: httpTimeoutSec,
+                    maxRetries: 0))
                 {
                     if (string.IsNullOrEmpty(opt.Command))
                     {
@@ -246,11 +253,23 @@ namespace AutostandTextController
 
             Console.WriteLine($"[{op}] sending...");
 
-            object raw = isUp
-                ? SendUpRaw(client, cfg.StandId, cfg.OpTimeoutSec)
-                : SendDownRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+            object raw = null;
+            Exception sendError = null;
 
-            PrintRawStandResultOrAck(op, raw);
+            try
+            {
+                raw = isUp
+                    ? SendUpNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                    : SendDownNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+
+                PrintRawStandResultOrAck(op, raw);
+            }
+            catch (Exception ex)
+            {
+                sendError = ex;
+                Console.WriteLine($"[{op}] local error while sending: {ex.GetType().Name}: {ex.Message}");
+                Console.WriteLine($"[{op}] Will try to confirm via wrangler tail (if available).");
+            }
 
             if (tail != null)
             {
@@ -258,10 +277,22 @@ namespace AutostandTextController
 
                 var ev = tail.WaitForNextResultSince(t0, cfg.WranglerTailTimeoutSec, cfg.WranglerTailUrlFilter);
                 PrintTailConfirmation(op, ev, cfg.WranglerTailTimeoutSec);
+
+                // If we saw Ok on the tail, treat as success even if the local request timed out/canceled.
+                if (ev != null && ev.IsOk)
+                {
+                    Console.WriteLine($"[{op}] confirmed by webhook log. (no retry)");
+                    Console.WriteLine();
+                    return;
+                }
             }
+
+            if (sendError != null)
+                throw sendError;
 
             Console.WriteLine();
         }
+
 
         private static void ExecuteStatusInteractive(AutostandClient client, RuntimeConfig cfg)
         {
@@ -292,30 +323,46 @@ namespace AutostandTextController
 
             using (var tail = WranglerTailWatcher.TryStart(cfg.WranglerTailApp))
             {
-                if (tail == null)
-                {
-                    // Even if tail is unavailable, avoid freezing by not waiting for transaction resolution.
-                    object raw0 = isUp
-                        ? SendUpRaw(client, cfg.StandId, cfg.OpTimeoutSec)
-                        : SendDownRaw(client, cfg.StandId, cfg.OpTimeoutSec);
-
-                    PrintRawStandResultOrAck(op, raw0);
-                    return;
-                }
-
                 var t0 = DateTime.Now;
 
-                object raw = isUp
-                    ? SendUpRaw(client, cfg.StandId, cfg.OpTimeoutSec)
-                    : SendDownRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+                object raw = null;
+                Exception sendError = null;
 
-                PrintRawStandResultOrAck(op, raw);
+                try
+                {
+                    raw = isUp
+                        ? SendUpNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                        : SendDownNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+
+                    PrintRawStandResultOrAck(op, raw);
+                }
+                catch (Exception ex)
+                {
+                    sendError = ex;
+                    Console.WriteLine($"[{op}] local error while sending: {ex.GetType().Name}: {ex.Message}");
+                    Console.WriteLine($"[{op}] Will try to confirm via wrangler tail (if available).");
+                }
+
+                if (tail == null)
+                {
+                    // If tail is unavailable, do NOT retry here (to avoid duplicate operations).
+                    if (sendError != null)
+                        throw sendError;
+                    return;
+                }
 
                 Console.WriteLine($"[{op}] waiting for wrangler tail confirmation... (timeout {cfg.WranglerTailTimeoutSec:0.###}s)");
                 var ev = tail.WaitForNextResultSince(t0, cfg.WranglerTailTimeoutSec, cfg.WranglerTailUrlFilter);
                 PrintTailConfirmation(op, ev, cfg.WranglerTailTimeoutSec);
+
+                if (ev != null && ev.IsOk)
+                    return;
+
+                if (sendError != null)
+                    throw sendError;
             }
         }
+
 
         private static void PrintTailConfirmation(string op, WranglerTailEvent ev, double timeoutSec)
         {
@@ -468,6 +515,110 @@ namespace AutostandTextController
                 return AwaitIfTask(res);
 
             throw new MissingMethodException("AutostandClient", "Down/DownAsync/Close/CloseAsync");
+        }
+
+
+        private static object SendUpNoWaitRaw(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            // Prefer no-wait variants to avoid blocking and to reduce timeout/cancel issues.
+            if (TryInvokeWithArgOptions(client, "Open", out res,
+                    new object[] { standId, false, timeoutSec },
+                    new object[] { standId, false },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "OpenAsync", out res,
+                    new object[] { standId, false, timeoutSec },
+                    new object[] { standId, false },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            object opRes;
+            if (TryRequestOperationNoWait(client, standId, isUp: true, out opRes))
+                return opRes;
+
+            // Fallback to the waiting call (may block on some library versions).
+            return SendUpRaw(client, standId, timeoutSec);
+        }
+
+        private static object SendDownNoWaitRaw(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "Close", out res,
+                    new object[] { standId, false, timeoutSec },
+                    new object[] { standId, false },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "CloseAsync", out res,
+                    new object[] { standId, false, timeoutSec },
+                    new object[] { standId, false },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            object opRes;
+            if (TryRequestOperationNoWait(client, standId, isUp: false, out opRes))
+                return opRes;
+
+            return SendDownRaw(client, standId, timeoutSec);
+        }
+
+        private static bool TryRequestOperationNoWait(AutostandClient client, int standId, bool isUp, out object result)
+        {
+            result = null;
+            object res;
+
+            // Newer Autostand.dll exposes RequestOperationAsync(standId, Direction).
+            var dirType = client.GetType().Assembly.GetType("Autostand.Direction");
+            if (dirType == null || !dirType.IsEnum)
+                return false;
+
+            object dirValue;
+            try
+            {
+                dirValue = Enum.Parse(dirType, isUp ? "UP" : "DOWN", ignoreCase: true);
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (TryInvokeWithArgOptions(client, "RequestOperationAsync", out res,
+                    new object[] { standId, dirValue },
+                    new object[] { (object)standId, dirValue }))
+            {
+                var receiptObj = AwaitIfTask(res);
+                var txCode = GetStringProperty(receiptObj, "TransactionCode");
+                if (!string.IsNullOrEmpty(txCode))
+                {
+                    result = txCode;
+                    return true;
+                }
+
+                result = receiptObj;
+                return true;
+            }
+
+            if (TryInvokeWithArgOptions(client, "RequestOperation", out res,
+                    new object[] { standId, dirValue },
+                    new object[] { (object)standId, dirValue }))
+            {
+                var receiptObj = res;
+                var txCode = GetStringProperty(receiptObj, "TransactionCode");
+                if (!string.IsNullOrEmpty(txCode))
+                {
+                    result = txCode;
+                    return true;
+                }
+
+                result = receiptObj;
+                return true;
+            }
+
+            return false;
         }
 
         private static object SendStatusRaw(AutostandClient client, int standId, double timeoutSec)

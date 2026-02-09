@@ -12,6 +12,14 @@
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <Deterministic>true</Deterministic>
+    <!--
+      Autostand.dll (from the separate autostand repository)
+
+      Default points to the user's local build output path.
+      You can override this when building:
+        msbuild AutostandTextController.csproj /p:AutostandDllPath="C:\\path\\to\\Autostand.dll"
+    -->
+    <AutostandDllPath Condition=" '$(AutostandDllPath)' == '' ">C:\Users\bene-0103\source\repos\autostand\bin\Debug\net481\Autostand.dll</AutostandDllPath>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -41,14 +49,20 @@
     <Reference Include="System.Data" />
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Xml" />
+    <Reference Include="Autostand">
+      <HintPath>$(AutostandDllPath)</HintPath>
+      <Private>True</Private>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="AutostandClient.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include=".gitignore" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
@@ -14,6 +15,10 @@ namespace AutostandTextController
         private const string ENV_STAND_ID = "AUTOSTAND_STAND_ID";
         private const string ENV_BASE_URL = "AUTOSTAND_BASE_URL";
         private const string ENV_OP_TIMEOUT_SEC = "AUTOSTAND_OP_TIMEOUT_SEC";
+
+        private const string ENV_WRANGLER_TAIL = "AUTOSTAND_WRANGLER_TAIL";
+        private const string ENV_WRANGLER_TAIL_APP = "AUTOSTAND_WRANGLER_TAIL_APP";
+        private const string ENV_WRANGLER_TAIL_TIMEOUT_SEC = "AUTOSTAND_WRANGLER_TAIL_TIMEOUT_SEC";
 
         private static int Main(string[] args)
         {
@@ -63,12 +68,28 @@ namespace AutostandTextController
                     }
                 }
 
+                var envTail = Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL);
+                var useWranglerTail = DetermineUseWranglerTail(envTail, baseUrl);
+
+                var tailApp = FirstNonEmpty(Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL_APP), "autostand-webhook");
+
+                double tailTimeoutSec = opTimeoutSec;
+                var envTailTimeout = Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL_TIMEOUT_SEC);
+                if (!string.IsNullOrEmpty(envTailTimeout))
+                {
+                    tailTimeoutSec = ParsePositiveDoubleOrThrow(envTailTimeout, "wrangler-tail-timeout-sec");
+                }
+
                 var cfg = new RuntimeConfig
                 {
                     ApiKey = apiKey,
                     StandId = standId,
                     BaseUrl = baseUrl,
-                    OpTimeoutSec = opTimeoutSec
+                    OpTimeoutSec = opTimeoutSec,
+                    UseWranglerTail = useWranglerTail,
+                    WranglerTailApp = tailApp,
+                    WranglerTailTimeoutSec = tailTimeoutSec,
+                    WranglerTailUrlFilter = BuildWranglerTailUrlFilter(baseUrl)
                 };
 
                 using (var client = new AutostandClient(apiKey: cfg.ApiKey, baseUrl: cfg.BaseUrl, timeoutSec: 10.0))
@@ -97,11 +118,11 @@ namespace AutostandTextController
             switch (cmd)
             {
                 case "up":
-                    PrintStand(DoUp(client, cfg.StandId, cfg.OpTimeoutSec));
+                    ExecuteUpDownOneShot(client, cfg, isUp: true);
                     break;
 
                 case "down":
-                    PrintStand(DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
+                    ExecuteUpDownOneShot(client, cfg, isUp: false);
                     break;
 
                 case "status":
@@ -122,69 +143,397 @@ namespace AutostandTextController
         private static void InteractiveLoop(AutostandClient client, RuntimeConfig cfg)
         {
             Console.WriteLine("AUTO STAND Text Controller");
-            Console.WriteLine("Commands: up, down, status, battery, help, quit");
             Console.WriteLine();
 
-            while (true)
+            WranglerTailWatcher tail = null;
+            if (cfg.UseWranglerTail)
             {
-                Console.Write($"stand={cfg.StandId}> ");
-                var line = Console.ReadLine();
-                if (line == null) return;
-
-                line = line.Trim();
-                if (line.Length == 0) continue;
-
-                var parts = SplitArgs(line);
-                if (parts.Length == 0) continue;
-
-                var cmd = NormalizeCommand(parts[0]);
-
-                try
+                tail = WranglerTailWatcher.TryStart(cfg.WranglerTailApp);
+                if (tail == null)
                 {
-                    if (cmd == "quit" || cmd == "exit" || cmd == "q")
-                        return;
-
-                    if (cmd == "help" || cmd == "h" || cmd == "?")
-                    {
-                        Console.WriteLine("Commands:");
-                        Console.WriteLine("  up       : UP");
-                        Console.WriteLine("  down     : DOWN");
-                        Console.WriteLine("  status   : 状態確認");
-                        Console.WriteLine("  battery  : バッテリー確認");
-                        Console.WriteLine("  quit     : 終了");
-                        Console.WriteLine();
-                        continue;
-                    }
-
-                    switch (cmd)
-                    {
-                        case "up":
-                            PrintStand(DoUp(client, cfg.StandId, cfg.OpTimeoutSec));
-                            break;
-
-                        case "down":
-                            PrintStand(DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
-                            break;
-
-                        case "status":
-                            PrintStand(DoStatus(client, cfg.StandId, cfg.OpTimeoutSec));
-                            break;
-
-                        case "battery":
-                            PrintBattery(DoBattery(client, cfg.StandId, cfg.OpTimeoutSec));
-                            break;
-
-                        default:
-                            Console.WriteLine($"Unknown command: {parts[0]}");
-                            Console.WriteLine("Type 'help' for commands.");
-                            break;
-                    }
+                    Console.WriteLine("wrangler tail: start failed (npx/wrangler not found?). Confirmation will be skipped.");
+                    Console.WriteLine();
                 }
-                catch (Exception ex)
+                else
                 {
-                    PrintException(ex);
+                    Console.WriteLine($"wrangler tail: watching '{cfg.WranglerTailApp}' (filter: {cfg.WranglerTailUrlFilter ?? "none"})");
+                    Console.WriteLine();
                 }
             }
+
+            using (tail)
+            {
+                while (true)
+                {
+                    PrintMenu();
+
+                    Console.Write($"stand={cfg.StandId}> ");
+                    var line = Console.ReadLine();
+                    if (line == null) return;
+
+                    line = line.Trim();
+                    if (line.Length == 0) continue;
+
+                    var parts = SplitArgs(line);
+                    if (parts.Length == 0) continue;
+
+                    var cmd = NormalizeCommand(parts[0]);
+
+                    try
+                    {
+                        if (cmd == "quit" || cmd == "exit" || cmd == "q")
+                            return;
+
+                        if (cmd == "help" || cmd == "h" || cmd == "?")
+                        {
+                            PrintInteractiveHelp();
+                            continue;
+                        }
+
+                        switch (cmd)
+                        {
+                            case "up":
+                                ExecuteUpDownInteractive(client, cfg, tail, isUp: true);
+                                break;
+
+                            case "down":
+                                ExecuteUpDownInteractive(client, cfg, tail, isUp: false);
+                                break;
+
+                            case "status":
+                                ExecuteStatusInteractive(client, cfg);
+                                break;
+
+                            case "battery":
+                                ExecuteBatteryInteractive(client, cfg);
+                                break;
+
+                            default:
+                                Console.WriteLine($"Unknown command: {parts[0]}");
+                                Console.WriteLine("Type 'help' for commands.");
+                                break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        PrintException(ex);
+                    }
+                }
+            }
+        }
+
+        private static void PrintMenu()
+        {
+            Console.WriteLine("Select: 1)up  2)down  3)status  4)battery   (help/h/? , quit/q)");
+        }
+
+        private static void PrintInteractiveHelp()
+        {
+            Console.WriteLine("Commands:");
+            Console.WriteLine("  1 / up       : UP");
+            Console.WriteLine("  2 / down     : DOWN");
+            Console.WriteLine("  3 / status   : 状態確認");
+            Console.WriteLine("  4 / battery  : バッテリー確認");
+            Console.WriteLine("  quit         : 終了");
+            Console.WriteLine();
+        }
+
+        private static void ExecuteUpDownInteractive(AutostandClient client, RuntimeConfig cfg, WranglerTailWatcher tail, bool isUp)
+        {
+            var op = isUp ? "up" : "down";
+
+            var t0 = DateTime.Now;
+
+            Console.WriteLine($"[{op}] sending...");
+
+            object raw = isUp
+                ? SendUpRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                : SendDownRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+
+            PrintRawStandResultOrAck(op, raw);
+
+            if (tail != null)
+            {
+                Console.WriteLine($"[{op}] waiting for wrangler tail confirmation... (timeout {cfg.WranglerTailTimeoutSec:0.###}s)");
+
+                var ev = tail.WaitForNextResultSince(t0, cfg.WranglerTailTimeoutSec, cfg.WranglerTailUrlFilter);
+                PrintTailConfirmation(op, ev, cfg.WranglerTailTimeoutSec);
+            }
+
+            Console.WriteLine();
+        }
+
+        private static void ExecuteStatusInteractive(AutostandClient client, RuntimeConfig cfg)
+        {
+            var raw = SendStatusRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+            PrintRawStandResultOrAck("status", raw);
+        }
+
+        private static void ExecuteBatteryInteractive(AutostandClient client, RuntimeConfig cfg)
+        {
+            var raw = SendBatteryRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+            PrintRawBatteryResultOrAck(raw);
+        }
+
+
+
+        private static void ExecuteUpDownOneShot(AutostandClient client, RuntimeConfig cfg, bool isUp)
+        {
+            var op = isUp ? "up" : "down";
+
+            if (!cfg.UseWranglerTail)
+            {
+                // Original behavior: try to return StandInfo by resolving transaction/status.
+                PrintStand(isUp
+                    ? DoUp(client, cfg.StandId, cfg.OpTimeoutSec)
+                    : DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
+                return;
+            }
+
+            using (var tail = WranglerTailWatcher.TryStart(cfg.WranglerTailApp))
+            {
+                if (tail == null)
+                {
+                    // Even if tail is unavailable, avoid freezing by not waiting for transaction resolution.
+                    object raw0 = isUp
+                        ? SendUpRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                        : SendDownRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+
+                    PrintRawStandResultOrAck(op, raw0);
+                    return;
+                }
+
+                var t0 = DateTime.Now;
+
+                object raw = isUp
+                    ? SendUpRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                    : SendDownRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+
+                PrintRawStandResultOrAck(op, raw);
+
+                Console.WriteLine($"[{op}] waiting for wrangler tail confirmation... (timeout {cfg.WranglerTailTimeoutSec:0.###}s)");
+                var ev = tail.WaitForNextResultSince(t0, cfg.WranglerTailTimeoutSec, cfg.WranglerTailUrlFilter);
+                PrintTailConfirmation(op, ev, cfg.WranglerTailTimeoutSec);
+            }
+        }
+
+        private static void PrintTailConfirmation(string op, WranglerTailEvent ev, double timeoutSec)
+        {
+            if (ev == null)
+            {
+                Console.WriteLine($"[{op}] wrangler tail: timeout (no confirmation within {timeoutSec:0.###}s)");
+                return;
+            }
+
+            var t = ev.LoggedAt ?? ev.ReceivedAt;
+
+            if (ev.IsOk)
+            {
+                Console.WriteLine($"[{op}] wrangler tail: Ok @ {t.ToString("yyyy/M/d HH:mm:ss", CultureInfo.InvariantCulture)}");
+                return;
+            }
+
+            if (ev.IsError)
+            {
+                Console.WriteLine($"[{op}] wrangler tail: Error @ {t.ToString("yyyy/M/d HH:mm:ss", CultureInfo.InvariantCulture)}");
+                Console.WriteLine(ev.RawLine);
+                return;
+            }
+
+            Console.WriteLine($"[{op}] wrangler tail: {ev.StatusText}");
+            Console.WriteLine(ev.RawLine);
+        }
+
+        private static void PrintRawStandResultOrAck(string opName, object raw)
+        {
+            if (raw == null)
+            {
+                Console.WriteLine($"[{opName}] request sent. (no response body)");
+                return;
+            }
+
+            if (raw is StandInfo s)
+            {
+                PrintStand(s);
+                return;
+            }
+
+            // Some APIs return a TransactionResult-like object with Stand property.
+            var s2 = ExtractStandFromObject(raw);
+            if (s2 != null)
+            {
+                PrintStand(s2);
+                return;
+            }
+
+            // Some APIs return a transaction code string.
+            if (raw is string tx)
+            {
+                Console.WriteLine($"[{opName}] request sent. (transaction: {tx})");
+                return;
+            }
+
+            Console.WriteLine($"[{opName}] request sent. (response type: {raw.GetType().FullName})");
+        }
+
+        private static void PrintRawBatteryResultOrAck(object raw)
+        {
+            if (raw == null)
+            {
+                Console.WriteLine("battery: request sent. (no response body)");
+                return;
+            }
+
+            if (raw is BatteryLevel b)
+            {
+                PrintBattery(b);
+                return;
+            }
+
+            if (raw is StandInfo s)
+            {
+                PrintBattery(s.Battery);
+                return;
+            }
+
+            var s2 = ExtractStandFromObject(raw);
+            if (s2 != null)
+            {
+                PrintBattery(s2.Battery);
+                return;
+            }
+
+            if (raw is string tx)
+            {
+                Console.WriteLine($"battery: request sent. (transaction: {tx})");
+                return;
+            }
+
+            Console.WriteLine($"battery: request sent. (response type: {raw.GetType().FullName})");
+        }
+
+        private static object SendUpRaw(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "Up", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "UpAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "Open", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "OpenAsync", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            throw new MissingMethodException("AutostandClient", "Up/UpAsync/Open/OpenAsync");
+        }
+
+        private static object SendDownRaw(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "Down", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "DownAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "Close", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "CloseAsync", out res,
+                    new object[] { standId, true, timeoutSec },
+                    new object[] { standId, true },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            throw new MissingMethodException("AutostandClient", "Down/DownAsync/Close/CloseAsync");
+        }
+
+        private static object SendStatusRaw(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "CheckStatus", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "CheckStatusAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "GetStatus", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "GetStatusAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "RequestStatusAsync", out res,
+                    new object[] { standId },
+                    new object[] { (object)standId }))
+            {
+                var receiptObj = AwaitIfTask(res);
+                var txCode = GetStringProperty(receiptObj, "TransactionCode");
+                if (!string.IsNullOrEmpty(txCode))
+                    return txCode;
+                return receiptObj;
+            }
+
+            throw new MissingMethodException("AutostandClient", "CheckStatus/CheckStatusAsync/GetStatus/GetStatusAsync/RequestStatusAsync");
+        }
+
+        private static object SendBatteryRaw(AutostandClient client, int standId, double timeoutSec)
+        {
+            object res;
+
+            if (TryInvokeWithArgOptions(client, "CheckBattery", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "CheckBatteryAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "GetBattery", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            if (TryInvokeWithArgOptions(client, "GetBatteryAsync", out res,
+                    new object[] { standId, timeoutSec },
+                    new object[] { standId }))
+                return AwaitIfTask(res);
+
+            // Fallback: status result may contain battery info.
+            return SendStatusRaw(client, standId, timeoutSec);
         }
 
         private static StandInfo DoUp(AutostandClient client, int standId, double timeoutSec)
@@ -667,6 +1016,11 @@ namespace AutostandTextController
         {
             var c = (raw ?? "").Trim().ToLowerInvariant();
 
+            if (c == "1") return "up";
+            if (c == "2") return "down";
+            if (c == "3") return "status";
+            if (c == "4") return "battery";
+
             if (c == "open") return "up";
             if (c == "close") return "down";
             if (c == "u" || c == "up") return "up";
@@ -781,6 +1135,378 @@ namespace AutostandTextController
             return new string(chars.ToArray());
         }
 
+
+        private static bool DetermineUseWranglerTail(string envValue, string baseUrl)
+        {
+            if (string.IsNullOrEmpty(envValue))
+                return IsWorkersDevUrl(baseUrl);
+
+            var v = envValue.Trim();
+
+            if (string.Equals(v, "auto", StringComparison.OrdinalIgnoreCase))
+                return IsWorkersDevUrl(baseUrl);
+
+            if (TryParseBool(v, out var b))
+                return b;
+
+            // Unknown -> fallback to auto
+            return IsWorkersDevUrl(baseUrl);
+        }
+
+        private static bool TryParseBool(string s, out bool value)
+        {
+            value = false;
+            if (s == null) return false;
+
+            var v = s.Trim().ToLowerInvariant();
+
+            if (v == "1" || v == "true" || v == "yes" || v == "y" || v == "on" || v == "enable" || v == "enabled")
+            {
+                value = true;
+                return true;
+            }
+
+            if (v == "0" || v == "false" || v == "no" || v == "n" || v == "off" || v == "disable" || v == "disabled")
+            {
+                value = false;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsWorkersDevUrl(string baseUrl)
+        {
+            if (string.IsNullOrEmpty(baseUrl)) return false;
+
+            if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var u))
+            {
+                if (!string.IsNullOrEmpty(u.Host))
+                {
+                    if (u.Host.EndsWith(".workers.dev", StringComparison.OrdinalIgnoreCase))
+                        return true;
+
+                    if (u.Host.IndexOf("workers.dev", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+
+            return baseUrl.IndexOf("workers.dev", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string BuildWranglerTailUrlFilter(string baseUrl)
+        {
+            if (string.IsNullOrEmpty(baseUrl)) return null;
+
+            if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var u))
+            {
+                if (!string.IsNullOrEmpty(u.Host))
+                    return u.Host;
+            }
+
+            // fallback: best-effort extract "host[:port]" part
+            var idx = baseUrl.IndexOf("://", StringComparison.Ordinal);
+            var s = idx >= 0 ? baseUrl.Substring(idx + 3) : baseUrl;
+            var slash = s.IndexOf('/');
+            if (slash >= 0) s = s.Substring(0, slash);
+            if (s.Length == 0) return null;
+
+            return s;
+        }
+
+        private sealed class WranglerTailEvent
+        {
+            public string Method;
+            public string Url;
+            public string StatusText;
+            public bool IsOk;
+            public bool IsError;
+            public DateTime ReceivedAt;
+            public DateTime? LoggedAt;
+            public string RawLine;
+        }
+
+        private sealed class WranglerTailWatcher : IDisposable
+        {
+            private readonly Process _proc;
+            private readonly object _gate = new object();
+
+            private TaskCompletionSource<WranglerTailEvent> _waiter;
+            private DateTime _waiterSince;
+            private string _waiterUrlFilter;
+
+            private WranglerTailWatcher(Process proc)
+            {
+                _proc = proc;
+            }
+
+            public static WranglerTailWatcher TryStart(string appName)
+            {
+                if (string.IsNullOrEmpty(appName))
+                    appName = "autostand-webhook";
+
+                try
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = "npx",
+                        Arguments = $"wrangler tail {EscapeArg(appName)}",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+
+                    var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                    if (!p.Start())
+                        return null;
+
+                    var w = new WranglerTailWatcher(p);
+
+                    p.OutputDataReceived += w.OnOutput;
+                    p.ErrorDataReceived += w.OnError;
+
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
+
+                    return w;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            public WranglerTailEvent WaitForNextResultSince(DateTime since, double timeoutSec, string urlContains)
+            {
+                if (_proc == null || _proc.HasExited)
+                    return null;
+
+                if (timeoutSec <= 0)
+                    timeoutSec = 30.0;
+
+                var tcs = new TaskCompletionSource<WranglerTailEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                lock (_gate)
+                {
+                    _waiter = tcs;
+                    _waiterSince = since;
+                    _waiterUrlFilter = urlContains;
+                }
+
+                try
+                {
+                    if (tcs.Task.Wait(TimeSpan.FromSeconds(timeoutSec)))
+                        return tcs.Task.Result;
+
+                    return null;
+                }
+                finally
+                {
+                    lock (_gate)
+                    {
+                        if (ReferenceEquals(_waiter, tcs))
+                        {
+                            _waiter = null;
+                            _waiterUrlFilter = null;
+                        }
+                    }
+                }
+            }
+
+            private void OnOutput(object sender, DataReceivedEventArgs e)
+            {
+                if (e == null || e.Data == null)
+                    return;
+
+                if (!TryParseTailLine(e.Data, out var ev))
+                    return;
+
+                TaskCompletionSource<WranglerTailEvent> waiter;
+                DateTime since;
+                string urlFilter;
+
+                lock (_gate)
+                {
+                    waiter = _waiter;
+                    since = _waiterSince;
+                    urlFilter = _waiterUrlFilter;
+                }
+
+                if (waiter == null)
+                    return;
+
+                // Filter by "since" using receive time (most robust across wrangler versions).
+                if (ev.ReceivedAt < since)
+                    return;
+
+                if (!string.IsNullOrEmpty(urlFilter))
+                {
+                    if (string.IsNullOrEmpty(ev.Url) || ev.Url.IndexOf(urlFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                        return;
+                }
+
+                if (!ev.IsOk && !ev.IsError)
+                    return;
+
+                lock (_gate)
+                {
+                    if (_waiter == waiter)
+                    {
+                        _waiter = null;
+                        _waiterUrlFilter = null;
+                    }
+                }
+
+                waiter.TrySetResult(ev);
+            }
+
+            private void OnError(object sender, DataReceivedEventArgs e)
+            {
+                // Keep silent by default. Errors (e.g., wrangler not found) are handled via TryStart().
+            }
+
+            public void Dispose()
+            {
+                try
+                {
+                    if (_proc != null && !_proc.HasExited)
+                    {
+                        try
+                        {
+                            _proc.Kill();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                try
+                {
+                    _proc?.Dispose();
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                lock (_gate)
+                {
+                    _waiter = null;
+                    _waiterUrlFilter = null;
+                }
+            }
+
+            private static string EscapeArg(string s)
+            {
+                if (string.IsNullOrEmpty(s)) return s;
+
+                if (s.IndexOf(' ') < 0 && s.IndexOf('"') < 0)
+                    return s;
+
+                return """ + s.Replace(""", "\\"") + """;
+            }
+
+            private static bool TryParseTailLine(string line, out WranglerTailEvent ev)
+            {
+                ev = null;
+                if (string.IsNullOrEmpty(line)) return false;
+
+                // Example:
+                //   POST https://autostand-webhook.example.workers.dev/api/autostand-webhook - Ok @ 2026/2/9 14:10:39
+                // We focus on extracting "method", "url", and "- Ok/- Error" + "@ timestamp" if present.
+
+                var firstSpace = line.IndexOf(' ');
+                if (firstSpace <= 0) return false;
+
+                var method = line.Substring(0, firstSpace).Trim();
+                if (method.Length == 0) return false;
+
+                var rest = line.Substring(firstSpace + 1).Trim();
+                if (rest.Length == 0) return false;
+
+                var secondSpace = rest.IndexOf(' ');
+                if (secondSpace <= 0) return false;
+
+                var url = rest.Substring(0, secondSpace).Trim();
+                if (url.Length == 0) return false;
+
+                var afterUrl = rest.Substring(secondSpace + 1);
+
+                var dashIdx = afterUrl.IndexOf('-');
+                if (dashIdx < 0) return false;
+
+                var statusPart = afterUrl.Substring(dashIdx + 1).Trim();
+
+                string statusText;
+                string tsText = null;
+
+                var atIdx = statusPart.LastIndexOf('@');
+                if (atIdx >= 0)
+                {
+                    statusText = statusPart.Substring(0, atIdx).Trim();
+                    tsText = statusPart.Substring(atIdx + 1).Trim();
+                }
+                else
+                {
+                    statusText = statusPart.Trim();
+                }
+
+                var isOk = statusText.StartsWith("Ok", StringComparison.OrdinalIgnoreCase) ||
+                           statusText.StartsWith("OK", StringComparison.OrdinalIgnoreCase);
+
+                var isErr = statusText.StartsWith("Error", StringComparison.OrdinalIgnoreCase) ||
+                            statusText.StartsWith("Err", StringComparison.OrdinalIgnoreCase) ||
+                            statusText.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                DateTime? loggedAt = null;
+
+                if (!string.IsNullOrEmpty(tsText))
+                {
+                    var patterns = new[]
+                    {
+                        "yyyy/M/d H:mm:ss",
+                        "yyyy/M/d HH:mm:ss",
+                        "yyyy/M/d H:mm:ss.FFF",
+                        "yyyy/M/d HH:mm:ss.FFF",
+                        "yyyy-MM-dd H:mm:ss",
+                        "yyyy-MM-dd HH:mm:ss",
+                        "yyyy-MM-dd H:mm:ss.FFF",
+                        "yyyy-MM-dd HH:mm:ss.FFF"
+                    };
+
+                    if (DateTime.TryParseExact(tsText, patterns, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt))
+                    {
+                        loggedAt = dt;
+                    }
+                    else if (DateTime.TryParse(tsText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt))
+                    {
+                        loggedAt = dt;
+                    }
+                }
+
+                ev = new WranglerTailEvent
+                {
+                    Method = method,
+                    Url = url,
+                    StatusText = statusText,
+                    IsOk = isOk,
+                    IsError = isErr,
+                    LoggedAt = loggedAt,
+                    ReceivedAt = DateTime.Now,
+                    RawLine = line
+                };
+
+                return true;
+            }
+        }
+
         private static void PrintHelp()
         {
             Console.WriteLine("Usage:");
@@ -799,6 +1525,11 @@ namespace AutostandTextController
             Console.WriteLine("  --op-timeout-sec <sec> (or env AUTOSTAND_OP_TIMEOUT_SEC, default 30)");
             Console.WriteLine("  --help");
             Console.WriteLine();
+            Console.WriteLine("Wrangler tail confirmation (optional):");
+            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL=1|0|auto   (default: auto when base-url contains workers.dev)");
+            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL_APP=<name> (default: autostand-webhook)");
+            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL_TIMEOUT_SEC=<sec> (default: op-timeout-sec)");
+            Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  AutostandTextController.exe up --stand-id 401 --api-key xxxxx");
             Console.WriteLine("  AutostandTextController.exe status");
@@ -811,6 +1542,11 @@ namespace AutostandTextController
             public int StandId;
             public string BaseUrl;
             public double OpTimeoutSec;
+
+            public bool UseWranglerTail;
+            public string WranglerTailApp;
+            public double WranglerTailTimeoutSec;
+            public string WranglerTailUrlFilter;
         }
 
         private sealed class Options

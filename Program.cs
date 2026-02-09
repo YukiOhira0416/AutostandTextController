@@ -17,6 +17,11 @@ namespace AutostandTextController
         private const string ENV_BASE_URL = "AUTOSTAND_BASE_URL";
         private const string ENV_OP_TIMEOUT_SEC = "AUTOSTAND_OP_TIMEOUT_SEC";
 
+        // HTTP response dump (text)
+        private const string ENV_HTTP_LOG = "AUTOSTAND_HTTP_LOG";
+        private const string ENV_HTTP_LOG_PATH = "AUTOSTAND_HTTP_LOG_PATH";
+        private const string ENV_HTTP_LOG_ALL = "AUTOSTAND_HTTP_LOG_ALL";
+
         private const string ENV_WRANGLER_TAIL = "AUTOSTAND_WRANGLER_TAIL";
         private const string ENV_WRANGLER_TAIL_APP = "AUTOSTAND_WRANGLER_TAIL_APP";
         private const string ENV_WRANGLER_TAIL_TIMEOUT_SEC = "AUTOSTAND_WRANGLER_TAIL_TIMEOUT_SEC";
@@ -93,14 +98,91 @@ namespace AutostandTextController
                     WranglerTailUrlFilter = BuildWranglerTailUrlFilter(baseUrl)
                 };
 
+                // HTTP response logging (default: enabled)
+                var envHttpLog = Environment.GetEnvironmentVariable(ENV_HTTP_LOG);
+                bool httpLogEnabled = true;
+                if (!string.IsNullOrEmpty(envHttpLog) && TryParseBool(envHttpLog, out var bHttpLog))
+                    httpLogEnabled = bHttpLog;
+
+                var httpLogPathOpt = opt.HttpLogPath;
+                if (!string.IsNullOrEmpty(httpLogPathOpt))
+                {
+                    var v = httpLogPathOpt.Trim();
+                    if (string.Equals(v, "off", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(v, "none", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(v, "disable", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(v, "disabled", StringComparison.OrdinalIgnoreCase))
+                    {
+                        httpLogEnabled = false;
+                    }
+                }
+
+                var httpLogPath = FirstNonEmpty(
+                    (httpLogEnabled ? httpLogPathOpt : null),
+                    Environment.GetEnvironmentVariable(ENV_HTTP_LOG_PATH),
+                    "autostand_http_responses.txt");
+
+                var envHttpLogAll = Environment.GetEnvironmentVariable(ENV_HTTP_LOG_ALL);
+                bool httpLogAll = false;
+                if (opt.HttpLogAll.HasValue)
+                {
+                    httpLogAll = opt.HttpLogAll.Value;
+                }
+                else if (!string.IsNullOrEmpty(envHttpLogAll) && TryParseBool(envHttpLogAll, out var bAll))
+                {
+                    httpLogAll = bAll;
+                }
+
+                cfg.HttpLogEnabled = httpLogEnabled;
+                cfg.HttpLogPath = httpLogPath;
+                cfg.HttpLogAll = httpLogAll;
+
                 var httpTimeoutSec = Math.Max(15.0, Math.Min(120.0, cfg.OpTimeoutSec + 5.0));
 
+                // Build HttpClient (optionally wrapped with a logging handler).
+                HttpMessageHandler innerHandler = new HttpClientHandler();
+
+                // NOTE: AutomaticDecompression is nice-to-have, but not available on every runtime.
+                try
+                {
+                    var h = innerHandler as HttpClientHandler;
+                    if (h != null)
+                        h.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                if (cfg.HttpLogEnabled)
+                {
+                    innerHandler = new HttpResponseLogHandler(
+                        innerHandler,
+                        cfg.HttpLogPath,
+                        () => HttpLogScope.CurrentOperationName,
+                        () => cfg.HttpLogAll);
+                }
+
+                using (var http = new HttpClient(innerHandler))
                 using (var client = new AutostandClient(
                     apiKey: cfg.ApiKey,
                     baseUrl: cfg.BaseUrl,
                     timeoutSec: httpTimeoutSec,
-                    maxRetries: 0))
+                    maxRetries: 0,
+                    client: http))
                 {
+                    // AutostandClient sets User-Agent only when it creates HttpClient internally.
+                    // When we inject HttpClient, we should keep the same behavior.
+                    try
+                    {
+                        http.Timeout = TimeSpan.FromSeconds(httpTimeoutSec);
+                        http.DefaultRequestHeaders.UserAgent.ParseAdd("autostand-client-csharp/1.0");
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+
                     if (string.IsNullOrEmpty(opt.Command))
                     {
                         InteractiveLoop(client, cfg);
@@ -151,6 +233,20 @@ namespace AutostandTextController
         {
             Console.WriteLine("AUTO STAND Text Controller");
             Console.WriteLine();
+
+            if (cfg.HttpLogEnabled)
+            {
+                try
+                {
+                    Console.WriteLine($"HTTP response log: {System.IO.Path.GetFullPath(cfg.HttpLogPath)}");
+                    Console.WriteLine("(scope: up/down only; set env AUTOSTAND_HTTP_LOG_ALL=1 to log all requests)");
+                    Console.WriteLine();
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
 
             WranglerTailWatcher tail = null;
             if (cfg.UseWranglerTail)
@@ -256,19 +352,22 @@ namespace AutostandTextController
             object raw = null;
             Exception sendError = null;
 
-            try
+            using (HttpLogScope.Begin(op))
             {
-                raw = isUp
-                    ? SendUpNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec)
-                    : SendDownNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+                try
+                {
+                    raw = isUp
+                        ? SendUpNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                        : SendDownNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec);
 
-                PrintRawStandResultOrAck(op, raw);
-            }
-            catch (Exception ex)
-            {
-                sendError = ex;
-                Console.WriteLine($"[{op}] local error while sending: {ex.GetType().Name}: {ex.Message}");
-                Console.WriteLine($"[{op}] Will try to confirm via wrangler tail (if available).");
+                    PrintRawStandResultOrAck(op, raw);
+                }
+                catch (Exception ex)
+                {
+                    sendError = ex;
+                    Console.WriteLine($"[{op}] local error while sending: {ex.GetType().Name}: {ex.Message}");
+                    Console.WriteLine($"[{op}] Will try to confirm via wrangler tail (if available).");
+                }
             }
 
             if (tail != null)
@@ -315,9 +414,12 @@ namespace AutostandTextController
             if (!cfg.UseWranglerTail)
             {
                 // Original behavior: try to return StandInfo by resolving transaction/status.
-                PrintStand(isUp
-                    ? DoUp(client, cfg.StandId, cfg.OpTimeoutSec)
-                    : DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
+                using (HttpLogScope.Begin(op))
+                {
+                    PrintStand(isUp
+                        ? DoUp(client, cfg.StandId, cfg.OpTimeoutSec)
+                        : DoDown(client, cfg.StandId, cfg.OpTimeoutSec));
+                }
                 return;
             }
 
@@ -328,19 +430,22 @@ namespace AutostandTextController
                 object raw = null;
                 Exception sendError = null;
 
-                try
+                using (HttpLogScope.Begin(op))
                 {
-                    raw = isUp
-                        ? SendUpNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec)
-                        : SendDownNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec);
+                    try
+                    {
+                        raw = isUp
+                            ? SendUpNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec)
+                            : SendDownNoWaitRaw(client, cfg.StandId, cfg.OpTimeoutSec);
 
-                    PrintRawStandResultOrAck(op, raw);
-                }
-                catch (Exception ex)
-                {
-                    sendError = ex;
-                    Console.WriteLine($"[{op}] local error while sending: {ex.GetType().Name}: {ex.Message}");
-                    Console.WriteLine($"[{op}] Will try to confirm via wrangler tail (if available).");
+                        PrintRawStandResultOrAck(op, raw);
+                    }
+                    catch (Exception ex)
+                    {
+                        sendError = ex;
+                        Console.WriteLine($"[{op}] local error while sending: {ex.GetType().Name}: {ex.Message}");
+                        Console.WriteLine($"[{op}] Will try to confirm via wrangler tail (if available).");
+                    }
                 }
 
                 if (tail == null)
@@ -1674,6 +1779,9 @@ namespace AutostandTextController
             Console.WriteLine("  --stand-id <id>        (or env AUTOSTAND_STAND_ID)");
             Console.WriteLine("  --base-url <url>       (or env AUTOSTAND_BASE_URL)");
             Console.WriteLine("  --op-timeout-sec <sec> (or env AUTOSTAND_OP_TIMEOUT_SEC, default 30)");
+            Console.WriteLine("  --http-log <path|off>  (or env AUTOSTAND_HTTP_LOG_PATH, default: autostand_http_responses.txt)");
+            Console.WriteLine("                        (disable with --http-log off or env AUTOSTAND_HTTP_LOG=0)");
+            Console.WriteLine("  --http-log-all         (or env AUTOSTAND_HTTP_LOG_ALL=1)");
             Console.WriteLine("  --help");
             Console.WriteLine();
             Console.WriteLine("Wrangler tail confirmation (optional):");
@@ -1694,6 +1802,10 @@ namespace AutostandTextController
             public string BaseUrl;
             public double OpTimeoutSec;
 
+            public bool HttpLogEnabled;
+            public string HttpLogPath;
+            public bool HttpLogAll;
+
             public bool UseWranglerTail;
             public string WranglerTailApp;
             public double WranglerTailTimeoutSec;
@@ -1708,6 +1820,8 @@ namespace AutostandTextController
             public string StandId;
             public string BaseUrl;
             public string OpTimeoutSec;
+            public string HttpLogPath;
+            public bool? HttpLogAll;
 
             public static Options Parse(string[] args)
             {
@@ -1751,6 +1865,18 @@ namespace AutostandTextController
                     if (a == "--op-timeout-sec")
                     {
                         o.OpTimeoutSec = NeedValue(list, ref i, "--op-timeout-sec");
+                        continue;
+                    }
+
+                    if (a == "--http-log")
+                    {
+                        o.HttpLogPath = NeedValue(list, ref i, "--http-log");
+                        continue;
+                    }
+
+                    if (a == "--http-log-all")
+                    {
+                        o.HttpLogAll = true;
                         continue;
                     }
 

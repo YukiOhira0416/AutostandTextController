@@ -239,7 +239,7 @@ namespace AutostandTextController
                 try
                 {
                     Console.WriteLine($"HTTP response log: {System.IO.Path.GetFullPath(cfg.HttpLogPath)}");
-                    Console.WriteLine("(scope: up/down only; set env AUTOSTAND_HTTP_LOG_ALL=1 to log all requests)");
+                    Console.WriteLine("(scope: up/down/status; set env AUTOSTAND_HTTP_LOG_ALL=1 to log all requests)");
                     Console.WriteLine();
                 }
                 catch
@@ -395,8 +395,15 @@ namespace AutostandTextController
 
         private static void ExecuteStatusInteractive(AutostandClient client, RuntimeConfig cfg)
         {
-            var raw = SendStatusRaw(client, cfg.StandId, cfg.OpTimeoutSec);
-            PrintRawStandResultOrAck("status", raw);
+            // For status, users typically expect to see the latest device state printed.
+            // Some Autostand.dll versions only provide a non-blocking status request
+            // (returning a transaction code). DoStatus() handles both:
+            // - direct status methods (CheckStatus/GetStatus)
+            // - RequestStatus + transaction resolution
+            using (HttpLogScope.Begin("status"))
+            {
+                PrintStand(DoStatus(client, cfg.StandId, cfg.OpTimeoutSec));
+            }
         }
 
         private static void ExecuteBatteryInteractive(AutostandClient client, RuntimeConfig cfg)

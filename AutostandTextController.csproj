@@ -101,6 +101,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="IniFileReader.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="HttpLogScope.cs" />
     <Compile Include="HttpResponseLogHandler.cs" />

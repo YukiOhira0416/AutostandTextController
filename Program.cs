@@ -26,6 +26,8 @@ namespace AutostandTextController
         private const string ENV_WRANGLER_TAIL_APP = "AUTOSTAND_WRANGLER_TAIL_APP";
         private const string ENV_WRANGLER_TAIL_TIMEOUT_SEC = "AUTOSTAND_WRANGLER_TAIL_TIMEOUT_SEC";
 
+        private const string DEFAULT_INI_FILE = "autostand.ini";
+
         private static int Main(string[] args)
         {
             try
@@ -38,7 +40,35 @@ namespace AutostandTextController
                     return 0;
                 }
 
-                var apiKey = FirstNonEmpty(opt.ApiKey, Environment.GetEnvironmentVariable(ENV_API_KEY));
+                // Load INI file if exists, or generate default
+                var ini = new IniFileReader();
+                var iniPath = opt.IniFilePath ?? DEFAULT_INI_FILE;
+
+                if (!ini.Load(iniPath))
+                {
+                    // Generate default INI file if it doesn't exist
+                    if (iniPath == DEFAULT_INI_FILE && !System.IO.File.Exists(iniPath))
+                    {
+                        try
+                        {
+                            IniFileReader.GenerateDefaultIniFile(iniPath);
+                            Console.WriteLine($"Generated default configuration file: {iniPath}");
+                            Console.WriteLine("Please edit the file and run again, or provide settings via command-line/environment variables.");
+                            Console.WriteLine();
+                        }
+                        catch
+                        {
+                            // Ignore generation errors
+                        }
+                    }
+                }
+
+                // Priority: Command-line > Environment > INI > Default
+                var apiKey = FirstNonEmpty(
+                    opt.ApiKey,
+                    Environment.GetEnvironmentVariable(ENV_API_KEY),
+                    ini.GetValue("API", "ApiKey"));
+
                 if (string.IsNullOrEmpty(apiKey))
                 {
                     Console.Write("API Key (AUTOSTAND_API_KEY): ");
@@ -46,7 +76,11 @@ namespace AutostandTextController
                     Console.WriteLine();
                 }
 
-                var standIdStr = FirstNonEmpty(opt.StandId, Environment.GetEnvironmentVariable(ENV_STAND_ID));
+                var standIdStr = FirstNonEmpty(
+                    opt.StandId,
+                    Environment.GetEnvironmentVariable(ENV_STAND_ID),
+                    ini.GetValue("API", "StandId"));
+
                 int standId = 0;
                 if (!string.IsNullOrEmpty(standIdStr))
                 {
@@ -58,7 +92,11 @@ namespace AutostandTextController
                     standId = ParsePositiveIntOrThrow(Console.ReadLine() ?? "", "stand-id");
                 }
 
-                var baseUrl = FirstNonEmpty(opt.BaseUrl, Environment.GetEnvironmentVariable(ENV_BASE_URL), AutostandClient.DefaultBaseUrl);
+                var baseUrl = FirstNonEmpty(
+                    opt.BaseUrl,
+                    Environment.GetEnvironmentVariable(ENV_BASE_URL),
+                    ini.GetValue("API", "BaseUrl"),
+                    AutostandClient.DefaultBaseUrl);
 
                 double opTimeoutSec = 30.0;
                 if (!string.IsNullOrEmpty(opt.OpTimeoutSec))
@@ -68,22 +106,33 @@ namespace AutostandTextController
                 else
                 {
                     var envOpTimeout = Environment.GetEnvironmentVariable(ENV_OP_TIMEOUT_SEC);
-                    if (!string.IsNullOrEmpty(envOpTimeout))
+                    var iniOpTimeout = ini.GetValue("Timeouts", "OperationTimeoutSec");
+                    var timeoutStr = FirstNonEmpty(envOpTimeout, iniOpTimeout);
+
+                    if (!string.IsNullOrEmpty(timeoutStr))
                     {
-                        opTimeoutSec = ParsePositiveDoubleOrThrow(envOpTimeout, "op-timeout-sec");
+                        opTimeoutSec = ParsePositiveDoubleOrThrow(timeoutStr, "op-timeout-sec");
                     }
                 }
 
                 var envTail = Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL);
-                var useWranglerTail = DetermineUseWranglerTail(envTail, baseUrl);
+                var iniTail = ini.GetValue("Wrangler", "WranglerTailEnabled");
+                var tailSetting = FirstNonEmpty(envTail, iniTail);
+                var useWranglerTail = DetermineUseWranglerTail(tailSetting, baseUrl);
 
-                var tailApp = FirstNonEmpty(Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL_APP), "autostand-webhook");
+                var tailApp = FirstNonEmpty(
+                    Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL_APP),
+                    ini.GetValue("Wrangler", "WranglerTailApp"),
+                    "autostand-webhook");
 
                 double tailTimeoutSec = opTimeoutSec;
                 var envTailTimeout = Environment.GetEnvironmentVariable(ENV_WRANGLER_TAIL_TIMEOUT_SEC);
-                if (!string.IsNullOrEmpty(envTailTimeout))
+                var iniTailTimeout = ini.GetValue("Timeouts", "WranglerTailTimeoutSec");
+                var tailTimeoutStr = FirstNonEmpty(envTailTimeout, iniTailTimeout);
+
+                if (!string.IsNullOrEmpty(tailTimeoutStr))
                 {
-                    tailTimeoutSec = ParsePositiveDoubleOrThrow(envTailTimeout, "wrangler-tail-timeout-sec");
+                    tailTimeoutSec = ParsePositiveDoubleOrThrow(tailTimeoutStr, "wrangler-tail-timeout-sec");
                 }
 
                 var cfg = new RuntimeConfig
@@ -100,8 +149,11 @@ namespace AutostandTextController
 
                 // HTTP response logging (default: enabled)
                 var envHttpLog = Environment.GetEnvironmentVariable(ENV_HTTP_LOG);
+                var iniHttpLog = ini.GetValue("Logging", "HttpLogEnabled");
                 bool httpLogEnabled = true;
-                if (!string.IsNullOrEmpty(envHttpLog) && TryParseBool(envHttpLog, out var bHttpLog))
+
+                var httpLogStr = FirstNonEmpty(envHttpLog, iniHttpLog);
+                if (!string.IsNullOrEmpty(httpLogStr) && TryParseBool(httpLogStr, out var bHttpLog))
                     httpLogEnabled = bHttpLog;
 
                 var httpLogPathOpt = opt.HttpLogPath;
@@ -120,17 +172,24 @@ namespace AutostandTextController
                 var httpLogPath = FirstNonEmpty(
                     (httpLogEnabled ? httpLogPathOpt : null),
                     Environment.GetEnvironmentVariable(ENV_HTTP_LOG_PATH),
+                    ini.GetValue("Logging", "HttpLogPath"),
                     "autostand_http_responses.txt");
 
                 var envHttpLogAll = Environment.GetEnvironmentVariable(ENV_HTTP_LOG_ALL);
+                var iniHttpLogAll = ini.GetValue("Logging", "HttpLogAll");
                 bool httpLogAll = false;
+
                 if (opt.HttpLogAll.HasValue)
                 {
                     httpLogAll = opt.HttpLogAll.Value;
                 }
-                else if (!string.IsNullOrEmpty(envHttpLogAll) && TryParseBool(envHttpLogAll, out var bAll))
+                else
                 {
-                    httpLogAll = bAll;
+                    var httpLogAllStr = FirstNonEmpty(envHttpLogAll, iniHttpLogAll);
+                    if (!string.IsNullOrEmpty(httpLogAllStr) && TryParseBool(httpLogAllStr, out var bAll))
+                    {
+                        httpLogAll = bAll;
+                    }
                 }
 
                 cfg.HttpLogEnabled = httpLogEnabled;
@@ -316,6 +375,26 @@ namespace AutostandTextController
                                 Console.WriteLine("Type 'help' for commands.");
                                 break;
                         }
+                    }
+                    catch (AutoStandTimeoutError ex)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("===== TIMEOUT =====");
+                        Console.WriteLine("Operation timed out. The device may still be processing.");
+                        Console.WriteLine("Check the device status or try again later.");
+                        Console.WriteLine($"Details: {ex.Message}");
+                        Console.WriteLine("===================");
+                        Console.WriteLine();
+                    }
+                    catch (AutoStandTransportError ex)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("===== NETWORK ERROR =====");
+                        Console.WriteLine("Network or connection error occurred.");
+                        Console.WriteLine("Check your network connection and try again.");
+                        Console.WriteLine($"Details: {ex.Message}");
+                        Console.WriteLine("=========================");
+                        Console.WriteLine();
                     }
                     catch (Exception ex)
                     {
@@ -1782,24 +1861,35 @@ namespace AutostandTextController
             Console.WriteLine("  battery  : バッテリー確認");
             Console.WriteLine();
             Console.WriteLine("Options:");
-            Console.WriteLine("  --api-key <key>        (or env AUTOSTAND_API_KEY)");
-            Console.WriteLine("  --stand-id <id>        (or env AUTOSTAND_STAND_ID)");
-            Console.WriteLine("  --base-url <url>       (or env AUTOSTAND_BASE_URL)");
-            Console.WriteLine("  --op-timeout-sec <sec> (or env AUTOSTAND_OP_TIMEOUT_SEC, default 30)");
-            Console.WriteLine("  --http-log <path|off>  (or env AUTOSTAND_HTTP_LOG_PATH, default: autostand_http_responses.txt)");
-            Console.WriteLine("                        (disable with --http-log off or env AUTOSTAND_HTTP_LOG=0)");
-            Console.WriteLine("  --http-log-all         (or env AUTOSTAND_HTTP_LOG_ALL=1)");
+            Console.WriteLine("  --ini-file <path>      INI configuration file (default: autostand.ini)");
+            Console.WriteLine("  --api-key <key>        (or env AUTOSTAND_API_KEY, or ini [API] ApiKey)");
+            Console.WriteLine("  --stand-id <id>        (or env AUTOSTAND_STAND_ID, or ini [API] StandId)");
+            Console.WriteLine("  --base-url <url>       (or env AUTOSTAND_BASE_URL, or ini [API] BaseUrl)");
+            Console.WriteLine("  --op-timeout-sec <sec> (or env AUTOSTAND_OP_TIMEOUT_SEC, or ini [Timeouts] OperationTimeoutSec)");
+            Console.WriteLine("  --http-log <path|off>  (or env AUTOSTAND_HTTP_LOG_PATH, or ini [Logging] HttpLogPath)");
+            Console.WriteLine("  --http-log-all         (or env AUTOSTAND_HTTP_LOG_ALL, or ini [Logging] HttpLogAll)");
             Console.WriteLine("  --help");
             Console.WriteLine();
+            Console.WriteLine("Configuration Priority:");
+            Console.WriteLine("  1. Command-line arguments");
+            Console.WriteLine("  2. Environment variables");
+            Console.WriteLine("  3. INI file settings");
+            Console.WriteLine("  4. Default values");
+            Console.WriteLine();
+            Console.WriteLine("INI File:");
+            Console.WriteLine("  If autostand.ini does not exist, a default template will be generated on first run.");
+            Console.WriteLine("  Edit the INI file to configure settings for deployment to other PCs.");
+            Console.WriteLine();
             Console.WriteLine("Wrangler tail confirmation (optional):");
-            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL=1|0|auto   (default: auto when base-url contains workers.dev)");
-            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL_APP=<name> (default: autostand-webhook)");
-            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL_TIMEOUT_SEC=<sec> (default: op-timeout-sec)");
+            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL=1|0|auto   (or ini [Wrangler] WranglerTailEnabled)");
+            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL_APP=<name> (or ini [Wrangler] WranglerTailApp)");
+            Console.WriteLine("  env AUTOSTAND_WRANGLER_TAIL_TIMEOUT_SEC=<sec> (or ini [Timeouts] WranglerTailTimeoutSec)");
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine("  AutostandTextController.exe up --stand-id 401 --api-key xxxxx");
             Console.WriteLine("  AutostandTextController.exe status");
-            Console.WriteLine("  (no args) -> interactive");
+            Console.WriteLine("  AutostandTextController.exe --ini-file myconfig.ini");
+            Console.WriteLine("  (no args) -> interactive mode (uses autostand.ini if available)");
         }
 
         private sealed class RuntimeConfig
@@ -1829,6 +1919,7 @@ namespace AutostandTextController
             public string OpTimeoutSec;
             public string HttpLogPath;
             public bool? HttpLogAll;
+            public string IniFilePath;
 
             public static Options Parse(string[] args)
             {
@@ -1848,6 +1939,12 @@ namespace AutostandTextController
                     if (a == "--help" || a == "-h" || a == "/?")
                     {
                         o.ShowHelp = true;
+                        continue;
+                    }
+
+                    if (a == "--ini-file" || a == "--config")
+                    {
+                        o.IniFilePath = NeedValue(list, ref i, "--ini-file");
                         continue;
                     }
 
